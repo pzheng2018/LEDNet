@@ -4,6 +4,13 @@ import torch.nn.init as init
 import torch.nn.functional as F
 from torch.nn.functional import interpolate as interpolate 
 
+def split(x):
+    c = int(x.size()[1])
+    c1 = round(c * 0.5)
+    x1 = x[:, :c1, :, :].contiguous()
+    x2 = x[:, c1:, :, :].contiguous()
+
+    return x1, x2
 
 def channel_shuffle(x,groups):
     batchsize, num_channels, height, width = x.data.size()
@@ -47,9 +54,18 @@ class DownsamplerBlock (nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, input):
-        output = torch.cat([self.conv(input), self.pool(input)], 1)
+        x1 = self.pool(input)
+        x2 = self.conv(input)
+
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+
+        output = torch.cat([x2, x1], 1)
         output = self.bn(output)
-		output = self.relu(output)
+        output = self.relu(output)
         return output
       
 
@@ -94,10 +110,12 @@ class SS_nbt_module(nn.Module):
     
     def forward(self, input):
 
-        x1 = input[:,:(input.shape[1]//2),:,:]
-        x2 = input[:,(input.shape[1]//2):,:,:]      
-    
-	    ##
+        # x1 = input[:,:(input.shape[1]//2),:,:]
+        # x2 = input[:,(input.shape[1]//2):,:,:]
+
+        residual = input
+        x1, x2 = split(input)
+
         output1 = self.conv3x1_1_l(x1)
         output1 = self.relu(output1)
         output1 = self.conv1x3_1_l(output1)
@@ -108,9 +126,8 @@ class SS_nbt_module(nn.Module):
         output1 = self.relu(output1)
         output1 = self.conv1x3_2_l(output1)
         output1 = self.bn2_l(output1)
-                   
-        ##
-		output2 = self.conv1x3_1_r(x2)
+
+        output2 = self.conv1x3_1_r(x2)
         output2 = self.relu(output2)
         output2 = self.conv3x1_1_r(output2)
         output2 = self.bn1_r(output2)
@@ -122,12 +139,13 @@ class SS_nbt_module(nn.Module):
         output2 = self.bn2_r(output2)
 
         if (self.dropout.p != 0):
-			output1 = self.dropout(output1)
+            output1 = self.dropout(output1)
             output2 = self.dropout(output2)
 
         out = self._concat(output1,output2)
-        out = F.relu(input+out,inplace=True)
-        return channel_shuffle(out,2)   
+        out = F.relu(residual + out, inplace=True)
+
+        return channel_shuffle(out, 2)
 
 
 class Encoder(nn.Module):
@@ -138,15 +156,15 @@ class Encoder(nn.Module):
 
         self.layers = nn.ModuleList()
 
-        for x in range(0, 3):   
-           self.layers.append(SS_nbt_module(32, 0.03, 1)) 
+        for x in range(0, 3):
+            self.layers.append(SS_nbt_module(32, 0.03, 1))
         
 
         self.layers.append(DownsamplerBlock(32,64))
         
 
-        for x in range(0, 2):   
-           self.layers.append(SS_nbt_module(64, 0.03, 1)) 
+        for x in range(0, 2):
+            self.layers.append(SS_nbt_module(64, 0.03, 1))
   
         self.layers.append(DownsamplerBlock(64,128))
 
@@ -192,14 +210,14 @@ class Interpolate(nn.Module):
 
 class APN_Module(nn.Module):
     def __init__(self, in_ch, out_ch):
-        super(APN_Module, self).__init__()		
-	# global pooling branch
+        super(APN_Module, self).__init__()
+        # global pooling branch
         self.branch1 = nn.Sequential(
                 nn.AdaptiveAvgPool2d(1),
                 Conv2dBnRelu(in_ch, out_ch, kernel_size=1, stride=1, padding=0)
 	)
 		
-	# midddle branch
+        # midddle branch
         self.mid = nn.Sequential(
 		Conv2dBnRelu(in_ch, out_ch, kernel_size=1, stride=1, padding=0)
 	)

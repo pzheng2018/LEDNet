@@ -3,18 +3,26 @@ import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
 
+def split(x):
+    c = int(x.size()[1])
+    c1 = round(c * 0.5)
+    x1 = x[:, :c1, :, :].contiguous()
+    x2 = x[:, c1:, :, :].contiguous()
+
+    return x1, x2
+
 def channel_shuffle(x,groups):
     batchsize, num_channels, height, width = x.data.size()
     
     channels_per_group = num_channels // groups
     
-    #reshape
+    # reshape
     x = x.view(batchsize,groups,
         channels_per_group,height,width)
     
     x = torch.transpose(x,1,2).contiguous()
     
-    #flatten
+    # flatten
     x = x.view(batchsize,-1,height,width)
     
     return x
@@ -34,10 +42,10 @@ class Conv2dBnRelu(nn.Module):
         return self.conv(x)
 
 
-##after Concat -> BN, you also can use Dropout like SS_nbt_module may be make a good result!
+# after Concat -> BN, you also can use Dropout like SS_nbt_module may be make a good result!
 class DownsamplerBlock (nn.Module):
     def __init__(self, in_channel, out_channel):
-        super().__init__()
+        super(DownsamplerBlock,self).__init__()
 
         self.conv = nn.Conv2d(in_channel, out_channel-in_channel, (3, 3), stride=2, padding=1, bias=True)
         self.pool = nn.MaxPool2d(2, stride=2)
@@ -45,10 +53,19 @@ class DownsamplerBlock (nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, input):
-        output = torch.cat([self.conv(input), self.pool(input)], 1)
+        x1 = self.pool(input)
+        x2 = self.conv(input)
+
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+
+        output = torch.cat([x2, x1], 1)
         output = self.bn(output)
-		output = self.relu(output)
-        return output 
+        output = self.relu(output)
+        return output
 
 
 class SS_nbt_module(nn.Module):
@@ -57,7 +74,7 @@ class SS_nbt_module(nn.Module):
 
         oup_inc = chann//2
         
-        #dw
+        # dw
         self.conv3x1_1_l = nn.Conv2d(oup_inc, oup_inc, (3,1), stride=1, padding=(1,0), bias=True)
 
         self.conv1x3_1_l = nn.Conv2d(oup_inc, oup_inc, (1,3), stride=1, padding=(0,1), bias=True)
@@ -70,7 +87,7 @@ class SS_nbt_module(nn.Module):
 
         self.bn2_l = nn.BatchNorm2d(oup_inc, eps=1e-03)
         
-        #dw
+        # dw
         self.conv3x1_1_r = nn.Conv2d(oup_inc, oup_inc, (3,1), stride=1, padding=(1,0), bias=True)
 
         self.conv1x3_1_r = nn.Conv2d(oup_inc, oup_inc, (1,3), stride=1, padding=(0,1), bias=True)
@@ -92,9 +109,11 @@ class SS_nbt_module(nn.Module):
     
     def forward(self, input):
 
-        x1 = input[:,:(input.shape[1]//2),:,:]
-        x2 = input[:,(input.shape[1]//2):,:,:]      
-    
+        # x1 = input[:,:(input.shape[1]//2),:,:]
+        # x2 = input[:,(input.shape[1]//2):,:,:]
+        residual = input
+        x1, x2 = split(input)
+
         output1 = self.conv3x1_1_l(x1)
         output1 = self.relu(output1)
         output1 = self.conv1x3_1_l(output1)
@@ -123,8 +142,8 @@ class SS_nbt_module(nn.Module):
             output2 = self.dropout(output2)
 
         out = self._concat(output1,output2)
-        out = F.relu(input+out,inplace=True)
-        return channel_shuffle(out,2) 
+        out = F.relu(residual + out, inplace=True)
+        return channel_shuffle(out, 2)
 
 
 class Encoder(nn.Module):
@@ -134,15 +153,15 @@ class Encoder(nn.Module):
         
         self.layers = nn.ModuleList()
 
-        for x in range(0, 3):   
-           self.layers.append(SS_nbt_module(32, 0.03, 1)) 
+        for x in range(0, 3):
+            self.layers.append(SS_nbt_module(32, 0.03, 1))
         
 
         self.layers.append(DownsamplerBlock(32,64))
         
 
-        for x in range(0, 2):   
-           self.layers.append(SS_nbt_module(64, 0.03, 1)) 
+        for x in range(0, 2):
+            self.layers.append(SS_nbt_module(64, 0.03, 1))
   
         self.layers.append(DownsamplerBlock(64,128))
 
